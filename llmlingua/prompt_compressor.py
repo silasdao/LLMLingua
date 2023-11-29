@@ -79,10 +79,7 @@ class PromptCompressor:
             tokenized_text = self.tokenizer(text, return_tensors="pt")
             input_ids = tokenized_text["input_ids"].to(self.device)
             attention_mask = tokenized_text["attention_mask"].to(self.device)
-        if past_key_values is not None:
-            past_length = past_key_values[0][0].shape[2]
-        else:
-            past_length = 0
+        past_length = 0 if past_key_values is None else past_key_values[0][0].shape[2]
         if end is None:
             end = input_ids.shape[1]
         end = min(end, past_length + self.max_position_embeddings)
@@ -104,10 +101,10 @@ class PromptCompressor:
         active_labels = shift_labels.view(-1)[active]
         loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
         loss = loss_fct(active_logits, active_labels)
-        if condition_mode == "before":
-            loss = loss[:condition_pos_id]
-        elif condition_mode == "after":
+        if condition_mode == "after":
             loss = loss[condition_pos_id:]
+        elif condition_mode == "before":
+            loss = loss[:condition_pos_id]
         res = loss.mean() if granularity == "sentence" else loss
         return (res, past_key_values) if return_kv else res
 
@@ -265,8 +262,13 @@ class PromptCompressor:
         condition_in_question: str = "none",
         granularity: str = "sentence",
     ):
-        if condition_in_question == "none":
-            return self.get_ppl(text, granularity=granularity)
+        if condition_in_question == "after":
+            return self.get_ppl(
+                text + question,
+                granularity=granularity,
+                condition_mode="after",
+                condition_pos_id=self.get_token_length(text) - 1,
+            )
         elif condition_in_question == "before":
             return self.get_ppl(
                 question + text,
@@ -274,13 +276,8 @@ class PromptCompressor:
                 condition_mode="after",
                 condition_pos_id=self.get_token_length(question) - 1,
             )
-        elif condition_in_question == "after":
-            return self.get_ppl(
-                text + question,
-                granularity=granularity,
-                condition_mode="after",
-                condition_pos_id=self.get_token_length(text) - 1,
-            )
+        elif condition_in_question == "none":
+            return self.get_ppl(text, granularity=granularity)
 
     def get_dynamic_compression_ratio(
         self,
@@ -351,11 +348,11 @@ class PromptCompressor:
 
         if target_token < 0:
             target_token = 100
-        target_token = eval("target_token" + context_budget)
+        target_token = eval(f"target_token{context_budget}")
         res = []
         used = force_context_ids if force_context_ids is not None else []
 
-        self.context_idxs.append([x for idx, (x, _) in enumerate(demostrations_sort)])
+        self.context_idxs.append([x for x, _ in demostrations_sort])
         for idx, _ in demostrations_sort:
             if idx >= len(context_tokens_length):
                 continue
@@ -393,7 +390,7 @@ class PromptCompressor:
                 i * (abs(dynamic_context_compression_ratio) / (N - 1)) if N > 1 else 0
                 for i in range(-(N - 1), N, 2)
             ][::-1]
-            dynamic_ratio_map = {i: j for i, j in zip(original_used, dynamic_ratio)}
+            dynamic_ratio_map = dict(zip(original_used, dynamic_ratio))
             dynamic_ratio = [dynamic_ratio_map[i] for i in used]
         else:
             dynamic_ratio = [0.0] * len(used)
@@ -975,6 +972,6 @@ class PromptCompressor:
             method = get_distance_sentbert
         elif rank_method == "openai":
             method = get_distance_openai
-        elif rank_method in ["longllmlingua", "llmlingua"]:
+        elif rank_method in {"longllmlingua", "llmlingua"}:
             method = get_distance_longllmlingua
         return method(context, question)
